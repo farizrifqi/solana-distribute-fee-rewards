@@ -8,7 +8,6 @@ import {
   getAccount,
   getAssociatedTokenAddressSync,
   getMint,
-  getOrCreateAssociatedTokenAccount,
   getTransferFeeConfig,
   NATIVE_MINT,
   type Mint,
@@ -47,14 +46,14 @@ const defaultRules: Rules = {
 const defaultOptions: RewardDistributionRunnerOptions = {
   distributionIntervalMinutes: 5,
   wdAndSwap: false,
-  swapFeePercent: 75,
-  minGetSol: 0.003,
+  swapFeePercent: 60,
+  minGetSol: 0.05,
   swapRewardPercent: 60,
-  minWithdrawPercent: 0.1,
+  minWithdrawPercent: 0.1, //! Not used yet
 };
 const mintLiquidityReserveCutPercent = 90;
 const balanceLogger = new Logger("balance");
-
+const BASE_FEE = 0.000005;
 class RewardDistributionRunner {
   private connection: Connection;
   private heliusRPCURL: string;
@@ -161,7 +160,7 @@ class RewardDistributionRunner {
       });
     } else {
       this.logger.log({
-        level: "warn",
+        level: "verbose",
         label: "cluster",
         message: `Running on devnet.`,
       });
@@ -188,7 +187,7 @@ class RewardDistributionRunner {
       process.exit();
     }
 
-    //! Validate rewards mint
+    //* Validate rewards mint
     for await (const reward of this.rewards.filter(
       (r) => r.publicKey.toString() != NATIVE_MINT.toString()
     )) {
@@ -208,15 +207,51 @@ class RewardDistributionRunner {
         process.exit();
       }
     }
-
+    const transferFeeConfig = getTransferFeeConfig(tokenInfo);
+    if (
+      !transferFeeConfig?.withheldAmount &&
+      !transferFeeConfig?.olderTransferFee.transferFeeBasisPoints &&
+      !transferFeeConfig?.withdrawWithheldAuthority
+    ) {
+      this.logger.log({
+        level: "error",
+        label: "validate",
+        message: "Transfer fee not detected on token",
+      });
+      process.exit();
+    }
+    if (
+      transferFeeConfig?.withdrawWithheldAuthority.toBase58() !=
+      this.signer.publicKey.toBase58()
+    ) {
+      this.logger.log({
+        level: "error",
+        label: "validate",
+        message: `Fee receiver not same, expected ${transferFeeConfig?.withdrawWithheldAuthority.toBase58()}`,
+      });
+      process.exit();
+    }
     const feeAuthorityBalance = await this.connection.getBalance(
       this.signer.publicKey
     );
-    if (!feeAuthorityBalance) {
+    if (
+      !feeAuthorityBalance ||
+      feeAuthorityBalance <
+        this.rewards.filter(
+          (reward) => reward.publicKey.toString() != NATIVE_MINT.toString()
+        ).length *
+          0.0023
+    ) {
       this.logger.log({
-        level: "warn",
+        level: "error",
         label: "validate",
-        message: "Account info not found",
+        message: `Fee authority have ${(
+          feeAuthorityBalance / LAMPORTS_PER_SOL
+        ).toFixed(5)} SOL. Need at least ${
+          this.rewards.filter(
+            (reward) => reward.publicKey.toString() != NATIVE_MINT.toString()
+          ).length * 0.0023
+        }`,
       });
       process.exit();
     } else {
@@ -229,36 +264,13 @@ class RewardDistributionRunner {
         });
         process.exit();
       }
-      const transferFeeConfig = getTransferFeeConfig(tokenInfo);
-      if (
-        !transferFeeConfig?.withheldAmount &&
-        !transferFeeConfig?.olderTransferFee.transferFeeBasisPoints &&
-        !transferFeeConfig?.withdrawWithheldAuthority
-      ) {
-        this.logger.log({
-          level: "error",
-          label: "validate",
-          message: "Transfer fee not detected on token",
-        });
-        process.exit();
-      }
-      if (
-        transferFeeConfig?.withdrawWithheldAuthority.toBase58() !=
-        this.signer.publicKey.toBase58()
-      ) {
-        this.logger.log({
-          level: "error",
-          label: "validate",
-          message: "Fee receiver not same",
-        });
-        process.exit();
-      }
+
       this.logger.log({
         level: "verbose",
         label: "account",
-        message: `Fee authority balance: ${
+        message: `Fee authority balance: ${(
           feeAuthorityBalance / LAMPORTS_PER_SOL
-        } SOL`,
+        ).toFixed(5)} SOL`,
       });
     }
 
@@ -284,7 +296,7 @@ class RewardDistributionRunner {
       });
       process.exit();
     }
-    //! Validate rewards mint poolInfo
+    // Validate rewards mint poolInfo
     for await (const reward of this.rewards.filter(
       (r) => r.publicKey.toString() != NATIVE_MINT.toString()
     )) {
@@ -305,35 +317,53 @@ class RewardDistributionRunner {
 
     this.poolInfo = poolInfo;
 
-    //!Validate ata rewards and mint
-    await getOrCreateAssociatedTokenAccount(
-      this.connection,
-      this.signer,
-      this.mint.address,
-      this.signer.publicKey,
-      false,
-      undefined,
-      undefined,
-      this.mint.programId,
-      ASSOCIATED_TOKEN_PROGRAM_ID
-    );
-    await sleep(1000);
+    // Validate ata rewards and mint
+    const txsCreateAta = [];
+    const ifMintAtaExist = await isAtaExist(this.connection, this._getAta());
+    if (!ifMintAtaExist) {
+      txsCreateAta.push(
+        createAssociatedTokenAccountInstruction(
+          this.signer.publicKey,
+          this._getAta(),
+          this.signer.publicKey,
+          this.mint.address,
+          this.mint.programId,
+          ASSOCIATED_TOKEN_PROGRAM_ID
+        )
+      );
+    }
+    await sleep(2000);
     for await (const reward of this.rewards.filter(
       (r) => r.publicKey.toString() != NATIVE_MINT.toString()
     )) {
       try {
-        await getOrCreateAssociatedTokenAccount(
-          this.connection,
-          this.signer,
+        const rewardAta = getAssociatedTokenAddressSync(
           reward.publicKey,
           this.signer.publicKey,
           false,
-          undefined,
-          undefined,
           reward.programId,
           ASSOCIATED_TOKEN_PROGRAM_ID
         );
+        const rewardAtaExist = await isAtaExist(this.connection, rewardAta);
+        if (!rewardAtaExist) {
+          this.logger.log({
+            level: "info",
+            label: "validate",
+            message: `Creating ATA for ${reward.name}`,
+          });
+          txsCreateAta.push(
+            createAssociatedTokenAccountInstruction(
+              this.signer.publicKey,
+              rewardAta,
+              this.signer.publicKey,
+              reward.publicKey,
+              reward.programId,
+              ASSOCIATED_TOKEN_PROGRAM_ID
+            )
+          );
+        }
       } catch (err) {
+        console.error(err);
         this.logger.log({
           level: "error",
           label: "validate",
@@ -343,6 +373,35 @@ class RewardDistributionRunner {
       }
       await sleep(1000);
     }
+    // Sending Tx Create ata
+    if (txsCreateAta.length > 0) {
+      try {
+        const createATATxMessage = new TransactionMessage({
+          payerKey: this.signer.publicKey,
+          recentBlockhash: (await this.connection.getLatestBlockhash())
+            .blockhash,
+          instructions: txsCreateAta,
+        }).compileToV0Message();
+        const createATAVersioned = new VersionedTransaction(createATATxMessage);
+        createATAVersioned.sign([this.signer]);
+        await this.connection.sendTransaction(createATAVersioned);
+        this.logger.log({
+          level: "info",
+          label: "validate",
+          message: `Success send tx create ATA for mint and rewards`,
+        });
+      } catch (err) {
+        console.error(err);
+        this.logger.log({
+          level: "error",
+          label: "validate",
+          message: `Something wrong on sending create ATA for reward tokens and mint`,
+        });
+        process.exit();
+      }
+    }
+
+    //* Done
     this.validated = true;
     this.logger.log({
       level: "info",
@@ -359,7 +418,7 @@ class RewardDistributionRunner {
     tokenAccounts: PublicKey[]
   ) {
     let totalWithdrawed = 0;
-    const limit = this.options.wdAndSwap == true ? 10 : 20;
+    const limit = this.options.wdAndSwap == true ? 15 : 24;
     const estTotalTx = Math.ceil(tokenAccounts.length / limit);
     this.logger.log({
       level: "verbose",
@@ -378,7 +437,7 @@ class RewardDistributionRunner {
       );
       totalWithdrawed += wd.withdrawAmount;
       preparedAccs.push(...wd.remaining);
-      await sleep(1000);
+      await sleep(2000);
     }
 
     const denom = 10 ** mint.decimals;
@@ -391,6 +450,234 @@ class RewardDistributionRunner {
     return totalWithdrawed;
   }
 
+  private calculateWithdrawFeeToSolLamports(
+    amountToken: number,
+    poolInfo: PoolInfo
+  ) {
+    return amountToken / poolInfo?.poolPrice!;
+  }
+  private calculateMintAmountOutFromSOL(amountSOL: number) {
+    return amountSOL * this.poolInfo!.poolPrice!;
+  }
+  private calculateSOLNeededToPerformWithdraw(totalHolders: number) {
+    const limit = this.options.wdAndSwap == true ? 15 : 24;
+    const estimatedTotalWithdrawTx = Math.ceil(totalHolders / limit);
+    const realTxFee = BASE_FEE * 10;
+    return realTxFee * estimatedTotalWithdrawTx * LAMPORTS_PER_SOL;
+  }
+  private calculateSOLNeededToPerformDistribute(
+    holders: Pantat[],
+    solGet: number
+  ) {
+    // Fee swapping rewards
+    const swapRewardFee = BASE_FEE * 10;
+    const nonNativeRewards = this.rewards.filter(
+      (reward) => reward.publicKey.toString() != NATIVE_MINT.toString()
+    );
+    const totalSwapRewardFee =
+      swapRewardFee * nonNativeRewards.length * LAMPORTS_PER_SOL;
+
+    // SOL Needed for native rewards
+    let sentSol = 0;
+    const nativeReward = this.rewards.filter(
+      (reward) => reward.publicKey.toString() == NATIVE_MINT.toString()
+    );
+    if (nativeReward.length > 0) {
+      const holdersGetByPercentage = holders.map((holder) => {
+        const holderPercentage = this.getHolderPercentage(holder.amount);
+        const amount = this.calculateAmount(
+          Number(solGet),
+          holderPercentage,
+          nativeReward[0].percent
+        );
+        return amount;
+      });
+      sentSol = holdersGetByPercentage.reduce((a, b) => a + b, 0);
+    }
+
+    const limitDividerByRewards = this.rewardDivider();
+    const instructionsSingleTx = 24 / limitDividerByRewards;
+    const estimatedTotalDistributeTx = Math.ceil(
+      holders.length / instructionsSingleTx
+    );
+    const realTxFee = BASE_FEE * 10;
+    const totalDistributeFee =
+      realTxFee * estimatedTotalDistributeTx * LAMPORTS_PER_SOL;
+
+    let totalEstimateFeeCreateATA = 0;
+    if (this.rules.ataExist == false) {
+      const estimateNotHaveAta = Math.floor((75 * instructionsSingleTx) / 100);
+      const feeCreateAta = 0.0023;
+      const estimateCreateAta =
+        estimateNotHaveAta * feeCreateAta * nonNativeRewards.length;
+      totalEstimateFeeCreateATA = estimateCreateAta * LAMPORTS_PER_SOL;
+    }
+    return (
+      totalDistributeFee +
+      totalSwapRewardFee +
+      sentSol +
+      totalEstimateFeeCreateATA
+    );
+  }
+  private async _simulateWithdrawFee(
+    mint: Mint,
+    ataReceiver: PublicKey,
+    receiver: Keypair,
+    tokenAccounts: PublicKey[],
+    remaining: PublicKey[] = []
+  ): Promise<{
+    withdrawAmount: number;
+    remaining: PublicKey[];
+  }> {
+    const ata = ataReceiver;
+    const ifAtaExist = await isAtaExist(this.connection, ata);
+    let totalFee = BASE_FEE;
+    let txs = [];
+    if (!ifAtaExist) {
+      totalFee += 0.0025;
+      txs.push(
+        createAssociatedTokenAccountInstruction(
+          receiver.publicKey,
+          ata,
+          receiver.publicKey,
+          mint.address,
+          this.mint.programId,
+          ASSOCIATED_TOKEN_PROGRAM_ID
+        )
+      );
+    }
+    txs.push(
+      createWithdrawWithheldTokensFromAccountsInstruction(
+        mint.address,
+        ata,
+        receiver.publicKey,
+        [],
+        tokenAccounts,
+        this.mint.programId
+      )
+    );
+    let initialBalance = -1;
+    try {
+      const bal = await getAccount(
+        this.connection,
+        ata,
+        "confirmed",
+        this.mint.programId
+      );
+      initialBalance = Number(bal.amount);
+    } catch (err) {}
+
+    //* Single TX
+    let { blockhash } = await this.connection.getLatestBlockhash();
+    const tx = new TransactionMessage({
+      payerKey: receiver.publicKey,
+      recentBlockhash: blockhash,
+      instructions: txs,
+    }).compileToV0Message();
+    try {
+      const txMessageBytes = tx.serialize();
+      if (txMessageBytes.length > 1232) {
+        throw new Error("max bytes");
+      }
+    } catch (err) {
+      const remainingAddress = tokenAccounts.splice(0, 1);
+      return await this._simulateWithdrawFee(
+        mint,
+        ataReceiver,
+        receiver,
+        tokenAccounts,
+        remainingAddress
+      );
+    }
+    const versionedTx = new VersionedTransaction(tx);
+    versionedTx.sign([receiver]);
+    try {
+      const vtxMessageBytes = versionedTx.serialize();
+      if (vtxMessageBytes.length > 1232) {
+        throw new Error("max bytes");
+      }
+    } catch (err) {
+      const remainingAddress = tokenAccounts.splice(0, 1);
+      return await this._simulateWithdrawFee(
+        mint,
+        ataReceiver,
+        receiver,
+        tokenAccounts,
+        remainingAddress
+      );
+    }
+    await sleep(1000);
+    const simulateTx = await this.connection.simulateTransaction(versionedTx, {
+      replaceRecentBlockhash: true,
+      accounts: {
+        encoding: "base64",
+        addresses: [ata.toBase58()],
+      },
+    });
+    if (!simulateTx.value.err) {
+      if (!simulateTx.value.accounts![0]?.data[0]) {
+        return { withdrawAmount: 0, remaining };
+      }
+      const afterSimulate = AccountLayout.decode(
+        Buffer.from(simulateTx.value.accounts![0]?.data[0]!, "base64")
+      );
+
+      if (
+        initialBalance > -1 &&
+        initialBalance == Number(afterSimulate.amount)
+      ) {
+        return { withdrawAmount: 0, remaining };
+      }
+
+      const withdrawAmount = Number(afterSimulate.amount) - initialBalance;
+      const solFromWD = this.calculateWithdrawFeeToSolLamports(
+        withdrawAmount,
+        this.poolInfo!
+      );
+      await sleep(500);
+
+      if (this.options.wdAndSwap != true) {
+        return {
+          remaining,
+          withdrawAmount: solFromWD - totalFee * LAMPORTS_PER_SOL,
+        };
+      }
+      totalFee += BASE_FEE;
+      return {
+        withdrawAmount: solFromWD - totalFee * LAMPORTS_PER_SOL,
+        remaining,
+      };
+    }
+    return { withdrawAmount: 0, remaining };
+  }
+  private async simulateWithdrawFee(
+    mint: Mint,
+    receiver: Keypair,
+    tokenAccounts: PublicKey[]
+  ) {
+    let totalWithdrawed = 0;
+    const limit = this.options.wdAndSwap == true ? 15 : 24;
+    const estTotalTx = Math.ceil(tokenAccounts.length / limit);
+    this.logger.log({
+      level: "verbose",
+      label: "withdraw",
+      message: `Token accounts ${tokenAccounts.length} -- Est Txs: ${estTotalTx}`,
+    });
+    const ata = this._getAta();
+    let preparedAccs = [...tokenAccounts];
+    while (preparedAccs.length > 0) {
+      const wd = await this._simulateWithdrawFee(
+        mint,
+        ata,
+        receiver,
+        preparedAccs.splice(0, limit)
+      );
+      totalWithdrawed += wd.withdrawAmount;
+      preparedAccs.push(...wd.remaining);
+      await sleep(1000);
+    }
+    return totalWithdrawed;
+  }
   private async _withdrawFee(
     mint: Mint,
     ataReceiver: PublicKey,
@@ -401,11 +688,8 @@ class RewardDistributionRunner {
     withdrawAmount: number;
     remaining: PublicKey[];
   }> {
-    this.logger.log({
-      level: "verbose",
-      label: "withdraw",
-      message: `Withdrawing fee from ${tokenAccounts.length} accounts`,
-    });
+    await sleep(2500);
+
     const ata = ataReceiver;
     const ifAtaExist = await isAtaExist(this.connection, ata);
     let txs = [];
@@ -440,6 +724,7 @@ class RewardDistributionRunner {
 
     let initialBalance = -1;
     try {
+      await sleep(2000);
       const bal = await getAccount(
         this.connection,
         ata,
@@ -509,8 +794,7 @@ class RewardDistributionRunner {
       const afterSimulate = AccountLayout.decode(
         Buffer.from(simulateTx.value.accounts![0]?.data[0]!, "base64")
       );
-      const afterSimulatePercent =
-        (Number(afterSimulate.amount) * 100) / Number(this.mint.supply);
+
       if (
         initialBalance > -1 &&
         initialBalance == Number(afterSimulate.amount)
@@ -518,22 +802,13 @@ class RewardDistributionRunner {
         this.logger.log({
           level: "warn",
           label: "withdraw",
-          message: `Seems no balance changes, skipping...`,
+          message: `No balance changes. skipping...`,
         });
         return { withdrawAmount: 0, remaining };
       }
-      if (afterSimulatePercent <= this.options.minWithdrawPercent!) {
-        this.logger.log({
-          level: "warn",
-          label: "withdraw",
-          message: `Withdrawed amount only ${afterSimulatePercent.toFixed(
-            3
-          )}% which less than ${
-            this.options.minWithdrawPercent
-          }% of max supply.`,
-        });
-        return { withdrawAmount: 0, remaining };
-      }
+      const afterSimulatePercent =
+        (Number(afterSimulate.amount) * 100) / Number(this.mint.supply);
+
       const withdrawAmount = Number(afterSimulate.amount) - initialBalance;
       await sleep(500);
       const sigwd = await this.connection.sendTransaction(versionedTx);
@@ -542,15 +817,16 @@ class RewardDistributionRunner {
         this.logger.log({
           level: "info",
           label: "withdraw",
-          message: `Gain +${
-            withdrawAmount / 10 ** mint.decimals
-          } (${afterSimulatePercent}%). tokens. at => ${sigwd}`,
+          message: `Gain +${(withdrawAmount / 10 ** mint.decimals).toFixed(
+            5
+          )} (${afterSimulatePercent.toFixed(4)}%) tokens from ${
+            tokenAccounts.length
+          } accounts. Signature => ${sigwd.split("").slice(0, 10).join("")}`,
         });
         return { remaining, withdrawAmount };
       }
 
-      //! If withdraw & swap in one tx
-
+      // If withdraw & swap in one tx
       const swapAmount = Math.round(
         (withdrawAmount * this.options.swapFeePercent!) / 100
       );
@@ -630,9 +906,6 @@ class RewardDistributionRunner {
           withdrawAmount / 10 ** mint.decimals
         } tokens from withdraw. at => ${sig} and swapped ${swapAmount}`,
       });
-
-      await sleep(5000);
-
       return { withdrawAmount, remaining };
     }
     console.log({ simulateTx });
@@ -646,6 +919,7 @@ class RewardDistributionRunner {
     holders: Pantat[],
     queuePosition: number,
     totalQueue: number,
+    solGet: number,
     unprocessed: Pantat[] = []
   ): Promise<Pantat[]> {
     holders = holders.filter(
@@ -665,7 +939,7 @@ class RewardDistributionRunner {
             reward.publicKey,
             feeAuthority.publicKey,
             false,
-            this.mint.programId,
+            reward.programId,
             ASSOCIATED_TOKEN_PROGRAM_ID
           );
           const recipient = new PublicKey(holder.owner);
@@ -673,19 +947,17 @@ class RewardDistributionRunner {
             reward.publicKey.toString().trim() == NATIVE_MINT.toString().trim()
           ) {
             const amount = this.calculateAmount(
-              Number(this.poolInfo?.rpcData.baseReserve),
+              Number(solGet),
               holderPercentage,
-              reward.percent
+              this.options.swapRewardPercent!
             );
-
             this.logger.log({
               level: "silly",
               label: "distribute",
-              message: `Distributed ${
-                amount / LAMPORTS_PER_SOL
-              } SOL to holder with ${holderPercentage.toFixed(3)}%`,
+              message: `Distributed ${(amount / LAMPORTS_PER_SOL).toFixed(
+                9
+              )} SOL to holder with ${holderPercentage.toFixed(3)}%`,
             });
-
             globalTxs.push(
               SystemProgram.transfer({
                 fromPubkey: this.signer.publicKey,
@@ -704,77 +976,100 @@ class RewardDistributionRunner {
               reward.programId,
               ASSOCIATED_TOKEN_PROGRAM_ID
             );
+
             const ataExists = await isAtaExist(this.connection, ataRecipient);
             if (balanceReward && (ataExists || this.rules.ataExist == false)) {
-              const amount = this.calculateAmount(
+              let amount = this.calculateAmount(
                 Number(balanceReward),
                 holderPercentage,
-                reward.percent
+                80
               );
-
               if (!ataExists) {
-                this.logger.log({
-                  level: "silly",
-                  label: "distribute",
-                  message: `Creating ATA token ${reward.name} for ${ataRecipient
-                    .toBase58()
-                    .split("")
-                    .slice(0, 5)
-                    .join("")}`,
-                });
+                const createATAFeeByMint =
+                  this.calculateMintAmountOutFromSOL(0.0023);
+                const reducedHolderAmount = holder.amount - createATAFeeByMint;
+                if (reducedHolderAmount > 0) {
+                  // Reduce amount by 0.0023 SOL (ATA CREATION)
+                  const reducedPercentage =
+                    this.getHolderPercentage(reducedHolderAmount);
+                  amount = this.calculateAmount(
+                    Number(balanceReward),
+                    reducedPercentage,
+                    80
+                  );
+                  this.logger.log({
+                    level: "silly",
+                    label: "distribute",
+                    message: `Creating ATA token ${
+                      reward.name
+                    } for ${ataRecipient
+                      .toBase58()
+                      .split("")
+                      .slice(0, 5)
+                      .join("")}`,
+                  });
+                  globalTxs.push(
+                    createAssociatedTokenAccountIdempotentInstruction(
+                      this.signer.publicKey,
+                      ataRecipient,
+                      recipient,
+                      r,
+                      reward.programId,
+                      ASSOCIATED_TOKEN_PROGRAM_ID
+                    )
+                  );
+                } else {
+                  this.logger.log({
+                    level: "warn",
+                    label: "distribute",
+                    message: `Skip Create ATA ${reward.name} for ${ataRecipient
+                      .toBase58()
+                      .split("")
+                      .slice(0, 5)
+                      .join(
+                        ""
+                      )}. Reduced holder amount ${reducedHolderAmount.toFixed(
+                      5
+                    )} tokens`,
+                  });
+                }
+              } else {
                 globalTxs.push(
-                  createAssociatedTokenAccountIdempotentInstruction(
-                    this.signer.publicKey,
-                    ataRecipient,
-                    recipient,
+                  createTransferCheckedInstruction(
+                    ata,
                     r,
-                    reward.programId,
-                    ASSOCIATED_TOKEN_PROGRAM_ID
+                    ataRecipient,
+                    feeAuthority.publicKey,
+                    amount,
+                    mint.decimals,
+                    [],
+                    reward.programId
                   )
                 );
               }
-              globalTxs.push(
-                createTransferCheckedInstruction(
-                  ata,
-                  r,
-                  ataRecipient,
-                  feeAuthority.publicKey,
-                  amount,
-                  mint.decimals,
-                  [],
-                  reward.programId
-                )
-              );
-
               this.logger.log({
                 level: "silly",
                 label: "distribute",
-                message: `Distributed ${amount / 10 ** 9} token ${
-                  reward.name
-                } to ${ataRecipient
+                message: `Distributed ${
+                  amount / 10 ** this.mint.decimals
+                } token ${reward.name} to ${ataRecipient
                   .toBase58()
                   .split("")
                   .slice(0, 5)
                   .join("")} with ${holderPercentage.toFixed(3)}%`,
               });
             } else {
-              if (!ataExists && this.rules.ataExist == false) {
+              if (!balanceReward) {
                 this.logger.log({
                   level: "warn",
                   label: "distribute",
-                  message: `ATA recipient not exists. Skipped.`,
+                  message: `No snapshot for reward ${reward.name}`,
                 });
               } else {
                 this.logger.log({
                   level: "warn",
                   label: "distribute",
-                  message: `No snapshot for reward ${reward.publicKey
-                    .toString()
-                    .toLowerCase()
-                    .trim()
-                    .split("")
-                    .slice(-6)
-                    .join("")}`,
+                  message: `ATA recipient not exists. Skipped.`,
                 });
               }
             }
@@ -783,6 +1078,9 @@ class RewardDistributionRunner {
         await sleep(50);
       }
       await sleep(50);
+    }
+    if (globalTxs.length == 0) {
+      return unprocessed;
     }
     const tx = new TransactionMessage({
       payerKey: this.signer.publicKey,
@@ -809,13 +1107,15 @@ class RewardDistributionRunner {
         holders,
         queuePosition,
         totalQueue,
+        solGet,
         remaining
       );
     }
     const versionedTx = new VersionedTransaction(tx);
     versionedTx.sign([this.signer]);
+    let serializedVTx;
     try {
-      const serializedVTx = versionedTx.serialize();
+      serializedVTx = versionedTx.serialize();
       if (serializedVTx.length > 1232) {
         throw Error("serialize error");
       }
@@ -833,6 +1133,7 @@ class RewardDistributionRunner {
         holders,
         queuePosition,
         totalQueue,
+        solGet,
         remaining
       );
     }
@@ -843,7 +1144,9 @@ class RewardDistributionRunner {
         this.logger.log({
           level: "info",
           label: "distribute",
-          message: `Distributed to ${holders.length} accounts. sig: ...${sig
+          message: `Distributed to ${holders.length} accounts. (${
+            globalTxs.length
+          } IX -- ${serializedVTx.length} bytes) sig: ...${sig
             .split("")
             .splice(-8)
             .join("")} - [${queuePosition + 1}]`,
@@ -856,7 +1159,6 @@ class RewardDistributionRunner {
         });
       }
     } else {
-      console.error({ simulateTx });
       unprocessed.push(...holders);
       this.logger.log({
         level: "error",
@@ -907,6 +1209,7 @@ class RewardDistributionRunner {
       tokenB: NATIVE_MINT,
     });
     if (poolInfo) this.poolInfo = poolInfo;
+    this._resetSnapshotReward();
   }
 
   private async _swapReward(patokanAmountSol: number) {
@@ -921,6 +1224,7 @@ class RewardDistributionRunner {
       label: "reward",
       message: `Swapping to reward ${patokanAmountSol}`,
     });
+    const txsSwap = [];
     for await (const reward of swapAbleRewards) {
       const amountToSwap = (patokanAmountSol * reward.percent) / 100;
       if (amountToSwap >= 0) {
@@ -931,7 +1235,6 @@ class RewardDistributionRunner {
             reward.publicKey,
             amountToSwap
           );
-
           const tx = new TransactionMessage({
             payerKey: this.signer.publicKey,
             recentBlockhash: (await this.connection.getLatestBlockhash())
@@ -940,26 +1243,27 @@ class RewardDistributionRunner {
           }).compileToV0Message();
           const versionedTx = new VersionedTransaction(tx);
           versionedTx.sign([this.signer]);
-          const sign = await this.connection.sendTransaction(versionedTx);
-          this.logger.log({
-            level: "verbose",
-            label: "swap-reward",
-            message: `Success swap reward ${reward.publicKey
-              .toString()
-              .split("")
-              .slice(-8)
-              .join("")} of ${reward.percent}% on => ${sign
-              .toString()
-              .split("")
-              .slice(-8)
-              .join("")}}`,
-          });
+          await sleep(2000);
+          const simulateTx = await this.connection.simulateTransaction(
+            versionedTx
+          );
+          if (!simulateTx.value.err) {
+            txsSwap.push(...swapTx.instructions);
+          } else {
+            this.logger.log({
+              level: "error",
+              label: "swap-reward",
+              message: `Skipping swap reward ${
+                reward.name
+              }, because: ${JSON.stringify(simulateTx.value.err)}`,
+            });
+          }
         } catch (err) {
           console.log({ err });
           this.logger.log({
-            level: "warn",
+            level: "error",
             label: "swap-reward",
-            message: `Failed tx swapping reward. Skipping...`,
+            message: `Skipping swap reward ${reward.name}`,
           });
         }
       } else {
@@ -969,8 +1273,26 @@ class RewardDistributionRunner {
           message: `Swapping reward ${amountToSwap} tokens. Skipping...`,
         });
       }
+      await sleep(2000);
     }
-    await sleep(3000);
+    const tx = new TransactionMessage({
+      payerKey: this.signer.publicKey,
+      recentBlockhash: (await this.connection.getLatestBlockhash()).blockhash,
+      instructions: [...txsSwap],
+    }).compileToV0Message();
+    const versionedTx = new VersionedTransaction(tx);
+    versionedTx.sign([this.signer]);
+    const sign = await this.connection.sendTransaction(versionedTx);
+    this.logger.log({
+      level: "verbose",
+      label: "swap-reward",
+      message: `Success swap ${this.rewards.length} rewards on => ${sign
+        .toString()
+        .split("")
+        .slice(-8)
+        .join("")}}`,
+    });
+    await sleep(2500);
   }
 
   private async swapFee(amount: number) {
@@ -978,7 +1300,7 @@ class RewardDistributionRunner {
       this.logger.log({
         level: "warn",
         label: "fee",
-        message: `Swapping token fee skipped.`,
+        message: `Swapping token fee skipped due to amount ${amount}`,
       });
 
       return;
@@ -1011,12 +1333,25 @@ class RewardDistributionRunner {
       });
       return;
     }
+    const initialBalance = await this.connection.getBalance(
+      this.signer.publicKey
+    );
+    await sleep(2500);
+    await this.connection.sendTransaction(versionedTx);
+    await sleep(2500);
+    const afterBalance = await this.connection.getBalance(
+      this.signer.publicKey
+    );
 
-    const tx = await this.connection.sendTransaction(versionedTx);
     this.logger.log({
       level: "verbose",
       label: "fee",
-      message: `Token fee ${amount / 10 ** 9} swapped to SOL`,
+      message: `Token fee ${(amount / 10 ** this.mint.decimals).toFixed(
+        5
+      )} swapped to ${(
+        (afterBalance - initialBalance) /
+        LAMPORTS_PER_SOL
+      ).toFixed(5)} SOL`,
     });
     return;
   }
@@ -1069,7 +1404,7 @@ class RewardDistributionRunner {
       reward.publicKey.toString()
     );
     const nonNative = rewards.filter((r) => r != NATIVE_MINT.toString());
-    const gap = this.rewards.length * 1.5;
+    const gap = this.rewards.length * 1.2;
     const total = gap + nonNative.length;
     return Math.floor(total);
   }
@@ -1080,6 +1415,7 @@ class RewardDistributionRunner {
     let basePercentage = (holderAmount * 100) / Number(this.mint.supply);
     return Number((basePercentage * cutRules).toFixed(4));
   }
+
   private calculateAmount(
     amount: number,
     holderPercentage: number,
@@ -1117,6 +1453,7 @@ class RewardDistributionRunner {
     const startBalance = await this.connection.getBalance(
       this.signer.publicKey
     );
+
     this.logger.log({
       level: "info",
       label: "signer",
@@ -1125,143 +1462,191 @@ class RewardDistributionRunner {
       )} SOL`,
     });
 
-    const listHolders = await getHolders(
+    // Preparing holders
+    let listHolders = await getHolders(
       this.mint.address.toBase58(),
       this.heliusRPCURL,
       this.logger
     );
+    const listWithdrawAbleHolders = listHolders.filter((holder) => {
+      return (
+        holder.owner.toString() !=
+          this.poolInfo?.poolKeys.authority.toString() &&
+        holder.withheld_amount > 0
+      );
+    });
 
-    const listAddressHolders = listHolders.flatMap(
+    const filteredHolders = listHolders.filter((h) => {
+      const holderPercentage = this.getHolderPercentage(h.amount);
+      return holderPercentage >= this.rules.minHold! && holderPercentage <= 90;
+    });
+
+    // Count total tx length
+    const limitDividerByRewards = this.rewardDivider();
+    const limit = 24 / limitDividerByRewards;
+    let distributed = 0;
+    let preparedHolders = [
+      ...filteredHolders.filter(
+        (obj, index, self) =>
+          index ===
+          self.findIndex(
+            (o) =>
+              o.owner.toLowerCase().trim() === obj.owner.toLowerCase().trim()
+          )
+      ),
+    ];
+    const listAddressHolders = listWithdrawAbleHolders.flatMap(
       (h) => new PublicKey(h.address)
     );
 
-    const initialSol = await this.connection.getBalance(this.signer.publicKey);
-    let wdAmount = await this.withdrawFee(
+    // Simulating SOL get total from withdraw
+    const estimateGetSolFromWd = await this.simulateWithdrawFee(
       this.mint,
       this.signer,
       listAddressHolders
     );
-    const percentageWd = (wdAmount * 100) / Number(this.mint.supply);
-    if (wdAmount != 0 && percentageWd >= 0.0005) {
-      if (this.options.wdAndSwap != true) {
-        const totalBalance = await this.connection.getTokenAccountBalance(
-          this._getAta()
-        );
-        await this.swapFee(
-          (Number(totalBalance.value.amount) * this.options.swapFeePercent!) /
-            100
-        );
-      }
-      await sleep(3000);
-      const afterWDSol = await this.connection.getBalance(
-        this.signer.publicKey
+    const estimatedSolOutFromWd = this.calculateSOLNeededToPerformWithdraw(
+      listAddressHolders.length
+    );
+
+    this.logger.log({
+      level: "debug",
+      label: "estimate",
+      message: `From WD -- IN: ${(
+        estimateGetSolFromWd / LAMPORTS_PER_SOL
+      ).toFixed(5)} SOL -- OUT: ${(
+        estimatedSolOutFromWd / LAMPORTS_PER_SOL
+      ).toFixed(5)} SOL`,
+    });
+
+    // Calculate estimate sol for distribute
+    const estimateSOLOutWhileDistribute =
+      this.calculateSOLNeededToPerformDistribute(
+        preparedHolders,
+        estimateGetSolFromWd
       );
-      await sleep(3000);
 
-      const filteredHolders = listHolders.filter((h) => {
-        const holderPercentage = this.getHolderPercentage(h.amount);
-
-        return (
-          holderPercentage >= this.rules.minHold! && holderPercentage <= 90
-        );
+    this.logger.log({
+      level: "debug",
+      label: "estimate",
+      message: `Estimated SOL used for distribute ${
+        estimateSOLOutWhileDistribute / LAMPORTS_PER_SOL
+      } SOL.`,
+    });
+    if (
+      estimateGetSolFromWd > estimatedSolOutFromWd &&
+      estimateGetSolFromWd > this.options.minGetSol! * LAMPORTS_PER_SOL &&
+      estimateGetSolFromWd > estimateSOLOutWhileDistribute
+    ) {
+      // Withdrawing process
+      let wdAmount = await this.withdrawFee(
+        this.mint,
+        this.signer,
+        listAddressHolders
+      );
+      const wdSol = this.calculateWithdrawFeeToSolLamports(
+        wdAmount,
+        this.poolInfo!
+      );
+      this.logger.log({
+        level: "info",
+        label: "runner",
+        message: `Withdrawed Fee ${
+          wdAmount / 10 ** this.mint.decimals
+        } Tokens. Get ${(wdSol / LAMPORTS_PER_SOL).toFixed(5)} SOL`,
       });
-      let gapSol = afterWDSol - initialSol;
-      const limitDividerByRewards = this.rewardDivider();
+      if (wdSol > estimateGetSolFromWd) {
+        if (this.options.wdAndSwap != true) {
+          await sleep(3000);
+          await this.swapFee(
+            (Number(wdAmount) * this.options.swapFeePercent!) / 100
+          );
+        }
+        await sleep(3000);
 
-      const limit = 24 / limitDividerByRewards;
-      let distributed = 0;
-
-      let preparedHolders = [
-        ...filteredHolders.filter(
-          (obj, index, self) =>
-            index ===
-            self.findIndex(
-              (o) =>
-                o.owner.toLowerCase().trim() === obj.owner.toLowerCase().trim()
-            )
-        ),
-      ];
-      gapSol = gapSol < 0 ? gapSol * -1 : gapSol;
-      const estimatedShouldMinimum = Math.ceil(preparedHolders.length / limit);
-      if (
-        gapSol >=
-        (this.options.minGetSol! * estimatedShouldMinimum) / LAMPORTS_PER_SOL
-      ) {
-        this.logger.log({
-          level: "verbose",
-          label: "runner",
-          message: `Got ${gapSol / LAMPORTS_PER_SOL} after Withdrawing`,
-        });
-        await this._swapReward(
-          (gapSol * this.options.swapRewardPercent!) / 100
-        );
-
+        // Swap reward
+        await this._swapReward((wdSol * this.options.swapRewardPercent!) / 100);
+        // Get reward snapshot
+        await sleep(3000);
         await this._getSnapshotReward();
+        await sleep(3000);
 
+        // Distributing
         this.logger.log({
           level: "verbose",
           label: "runner",
           message: `${filteredHolders.length} accounts passed (held ${this.rules.minHold}%) of ${listHolders.length}`,
         });
-        this.logger.log({
-          level: "verbose",
-          label: "runner",
-          message: `Runner transfer, to ${filteredHolders.length} accounts`,
-        });
-
         let i = 0;
         while (preparedHolders.length > 0) {
           const totalQueued = Math.ceil(preparedHolders.length / limit);
-
           const holders = preparedHolders.splice(0, limit);
+
           if (holders.length > 0) {
             const remaining = await this.distribute(
               this.signer,
               this.mint,
               holders,
               i++,
-              totalQueued
+              totalQueued,
+              wdSol
             );
             if (remaining.length > 0) preparedHolders.push(...remaining);
             distributed += holders.length;
-            await sleep(3000);
-          } else {
-            console.log("aw", holders.length, preparedHolders.length);
+            await sleep(2000);
           }
         }
-
         this.logger.log({
           level: "info",
           label: "runner",
           message: `Distribution complete`,
         });
       } else {
+        // Skip withdraw too expensive
         this.logger.log({
           level: "warn",
           label: "runner",
-          message: `Got less than ${
-            (this.options.minGetSol! * estimatedShouldMinimum) /
-            LAMPORTS_PER_SOL
-          } SOL from withdraw. Skipping distribution...`,
+          message: `Withdraw actual ${wdSol / LAMPORTS_PER_SOL} SOL. Expected ${
+            estimateGetSolFromWd / LAMPORTS_PER_SOL
+          } SOL. Skipping distribution...`,
         });
       }
     } else {
-      if (wdAmount == 0) {
+      if (estimateGetSolFromWd <= this.options.minGetSol! * LAMPORTS_PER_SOL) {
         this.logger.log({
-          level: "info",
-          label: "runner",
-          message: `No balance change while withdraw. Distribution skipped. `,
+          level: "warn",
+          label: "withdraw",
+          message: `Estimated get ${(
+            estimateGetSolFromWd / LAMPORTS_PER_SOL
+          ).toFixed(5)} SOL less than minimum (${
+            this.options.minGetSol
+          } SOL). Skipping withdraw...`,
         });
-      }
-      if (percentageWd >= 0.0005) {
+      } else if (estimateGetSolFromWd > estimateSOLOutWhileDistribute) {
+        // Skip distribute too expensive
         this.logger.log({
-          level: "info",
+          level: "warn",
           label: "runner",
-          message: `Withdraw amount too low. Distribution skipped. `,
+          message: `Estimated WD ${
+            estimateGetSolFromWd / LAMPORTS_PER_SOL
+          } SOL. Estimated distribute OUT ${
+            estimateSOLOutWhileDistribute / LAMPORTS_PER_SOL
+          } SOL. Skipping withdraw...`,
+        });
+      } else {
+        // SOL IN and OUT from estimated
+        this.logger.log({
+          level: "warn",
+          label: "runner",
+          message: `Est IN (${(estimateGetSolFromWd / LAMPORTS_PER_SOL).toFixed(
+            5
+          )} SOL) -- Est Distribute Used (${(
+            estimatedSolOutFromWd / LAMPORTS_PER_SOL
+          ).toFixed(5)} SOL). Skipping withdraw...`,
         });
       }
     }
-    await sleep(1000);
+    await sleep(2000);
     const endBalance = await this.connection.getBalance(this.signer.publicKey);
     balanceLogger.log({
       level: "info",
@@ -1273,11 +1658,10 @@ class RewardDistributionRunner {
       ).toFixed(7)} SOL`,
     });
     this.logger.log({
-      level: "silly",
+      level: "verbose",
       label: "runner",
       message: `Waiting for next distribution time in ${this.options.distributionIntervalMinutes} minutes`,
     });
-    this._resetSnapshotReward();
     await sleep(this.options.distributionIntervalMinutes! * 60 * 1000);
     return await this.run();
   }
