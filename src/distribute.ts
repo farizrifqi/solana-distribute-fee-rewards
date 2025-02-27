@@ -1254,11 +1254,21 @@ class RewardDistributionRunner {
   }
 
   private async revalidate() {
+    const balance = await this.connection.getBalance(this.signer.publicKey);
+    if (balance <= 0.05 * LAMPORTS_PER_SOL) {
+      this.logger.log({
+        level: "error",
+        label: "signer",
+        message: `Balance signer less than 0.05 SOL.`,
+      });
+      process.exit();
+    }
     this.logger.log({
       level: "verbose",
       label: "revalidate",
       message: `Revalidating poolInfo.`,
     });
+    await sleep(2000);
     const poolInfo = await getPoolInfo({
       raydium: this.raydium!,
       tokenA: this.mint.address,
