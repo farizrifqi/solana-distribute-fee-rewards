@@ -1589,7 +1589,7 @@ class RewardDistributionRunner {
         estimateGetSolFromWd / LAMPORTS_PER_SOL
       ).toFixed(10)} SOL -- OUT: ${(
         estimatedSolOutFromWd / LAMPORTS_PER_SOL
-      ).toFixed(5)} SOL`,
+      ).toFixed(5)} SOL from ${listAddressHolders.length}`,
     });
 
     // Calculate estimate sol for distribute
@@ -1606,17 +1606,16 @@ class RewardDistributionRunner {
         estimateSOLOutWhileDistribute / LAMPORTS_PER_SOL
       } SOL.`,
     });
-    // if (
-    //   estimateGetSolFromWd > estimatedSolOutFromWd &&
-    //   estimateGetSolFromWd > this.options.minGetSol! * LAMPORTS_PER_SOL &&
-    //   estimateGetSolFromWd > estimateSOLOutWhileDistribute
-    // ) {
-    //! Set if(true) to force
-    if (true) {
+    if (
+      estimateGetSolFromWd > estimatedSolOutFromWd &&
+      estimateGetSolFromWd > this.options.minGetSol! * LAMPORTS_PER_SOL &&
+      estimateGetSolFromWd > estimateSOLOutWhileDistribute
+    ) {
+      // if (true) {
       // Withdrawing process
-      let initialTok = await this.connection.getTokenAccountBalance(
-        this._getAta()
-      );
+      // let initialTok = await this.connection.getTokenAccountBalance(
+      //   this._getAta()
+      // );
       await sleep(2000);
       let initialBal = await this.connection.getBalance(this.signer.publicKey);
       let wdAmount = await this.withdrawFee(
@@ -1625,10 +1624,10 @@ class RewardDistributionRunner {
         listAddressHolders
       );
 
-      await sleep(3000);
-      const afterTol = await this.connection.getTokenAccountBalance(
-        this._getAta()
-      );
+      // await sleep(3000);
+      // const afterTol = await this.connection.getTokenAccountBalance(
+      //   this._getAta()
+      // );
 
       let wdSol = this.calculateWithdrawFeeToSolLamports(
         wdAmount,
@@ -1653,14 +1652,7 @@ class RewardDistributionRunner {
         await sleep(3000);
 
         let afterBal = await this.connection.getBalance(this.signer.publicKey);
-        console.info({
-          initialTok,
-          wdAmount,
-          afterTol,
-          wdSol,
-          initialBal,
-          afterBal,
-        });
+
         if (afterBal - initialBal > 0) {
           wdSol = afterBal - initialBal;
 
