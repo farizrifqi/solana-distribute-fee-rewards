@@ -8,7 +8,7 @@ import type Logger from "../services/logger";
  * @params swapFeePercent Percentage of withdraw amount will be swapped into SOL - default `75`
  * @params minGetSol How much minimum SOL balance get from swapping withdraw fee to continue distribution. - default `0.003`
  * @params swapRewardPercent How many percent of SOL from withdraw fee to be swapped into rewards - default `60` (percent)
- * @params minWithdrawPercent How many percent of withdraw fee of total supply to process withdraw - default `0.1` (percent)
+ * @params maxWithdrawpercent How many percent of withdraw fee of total supply to process withdraw - default `0.1` (percent)
  */
 export interface RewardDistributionRunnerOptions {
   distributionIntervalMinutes?: number;
@@ -16,7 +16,7 @@ export interface RewardDistributionRunnerOptions {
   swapFeePercent?: number;
   minGetSol?: number;
   swapRewardPercent?: number;
-  minWithdrawPercent?: number;
+  maxWithdrawpercent?: number;
 }
 
 /**

@@ -9,6 +9,7 @@ import {
   getAccount,
   getAssociatedTokenAddressSync,
   getMint,
+  getTransferFeeAmount,
   getTransferFeeConfig,
   NATIVE_MINT,
   type Mint,
@@ -414,8 +415,13 @@ class RewardDistributionRunner {
   }
   private getWithdrawAbleTokenAccounts(listHolders: Pantat[]) {
     let holders = [...listHolders];
-    let wdAmount = holders.splice(0, 1)[0]?.withheld_amount ?? 0;
+    const spliced = holders.splice(0, 1)[0];
+    let wdAmount = 0;
     let results = [];
+    if (spliced) {
+      wdAmount += spliced.withheld_amount;
+      results.push(spliced);
+    }
     const maxPercent = this.options.maxWithdrawpercent!;
     for (const holder of holders) {
       const percentage = this.getHolderPercentage(
@@ -1538,12 +1544,14 @@ class RewardDistributionRunner {
         holder.owner.toString() != this.poolInfo?.poolKeys.authority.toString()
       );
     });
+
     //!Test new holders
     const listWithdrawAbleHolders = this.getWithdrawAbleTokenAccounts(
       listHolders
         .filter((holder) => holder.withheld_amount > 0)
         .sort((a, b) => b.withheld_amount - a.withheld_amount)
     );
+
     const filteredHolders = listHolders.filter((h) => {
       const holderPercentage = this.getHolderPercentage(h.amount);
       return holderPercentage >= this.rules.minHold!;
