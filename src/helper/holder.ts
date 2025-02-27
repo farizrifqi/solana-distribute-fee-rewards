@@ -47,11 +47,14 @@ export const getHolders = async (
       label: "holder",
       message: `Gathering holder...`,
     });
+
     data.result.token_accounts.forEach((account: any) =>
       allOwners.push({
         owner: account.owner,
         address: account.address,
         amount: account.amount,
+        withheld_amount:
+          account.token_extensions?.transfer_fee_amount?.withheld_amount ?? 0,
       })
     );
     page++;
