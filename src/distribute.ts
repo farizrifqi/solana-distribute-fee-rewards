@@ -1572,12 +1572,14 @@ class RewardDistributionRunner {
     );
 
     // Simulating SOL get total from withdraw
-    let estimateGetSolFromWd = await this.simulateWithdrawFee(
-      this.mint,
-      this.signer,
-      listAddressHolders
-    );
 
+    let estimateGetSolFromWd = this.calculateWithdrawFeeToSolLamports(
+      listWithdrawAbleHolders.reduce(
+        (acc, curr) => (acc += curr.withheld_amount),
+        0 as number
+      ),
+      this.poolInfo!
+    );
     let estimatedSolOutFromWd = this.calculateSOLNeededToPerformWithdraw(
       listAddressHolders.length
     );
@@ -1611,6 +1613,7 @@ class RewardDistributionRunner {
       estimateGetSolFromWd > this.options.minGetSol! * LAMPORTS_PER_SOL &&
       estimateGetSolFromWd > estimateSOLOutWhileDistribute
     ) {
+      //! if (true) to force
       // if (true) {
       // Withdrawing process
       // let initialTok = await this.connection.getTokenAccountBalance(
