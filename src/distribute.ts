@@ -50,6 +50,7 @@ const defaultOptions: RewardDistributionRunnerOptions = {
   swapFeePercent: 75,
   minGetSol: 0.003,
   swapRewardPercent: 60,
+  minWithdrawPercent: 0.1,
 };
 const mintLiquidityReserveCutPercent = 90;
 const balanceLogger = new Logger("balance");
@@ -521,13 +522,15 @@ class RewardDistributionRunner {
         });
         return { withdrawAmount: 0, remaining };
       }
-      if (afterSimulatePercent <= 0.1) {
+      if (afterSimulatePercent <= this.options.minWithdrawPercent!) {
         this.logger.log({
           level: "warn",
           label: "withdraw",
           message: `Withdrawed amount only ${afterSimulatePercent.toFixed(
             3
-          )}% which less than 0.1% of max supply.`,
+          )}% which less than ${
+            this.options.minWithdrawPercent
+          }% of max supply.`,
         });
         return { withdrawAmount: 0, remaining };
       }
