@@ -413,10 +413,11 @@ class RewardDistributionRunner {
     await sleep(2000);
   }
   private getWithdrawAbleTokenAccounts(listHolders: Pantat[]) {
-    let wdAmount = 0;
+    let holders = [...listHolders];
+    let wdAmount = holders.splice(0, 1)[0]?.withheld_amount ?? 0;
     let results = [];
     const maxPercent = this.options.maxWithdrawpercent!;
-    for (const holder of listHolders) {
+    for (const holder of holders) {
       const percentage = this.getHolderPercentage(
         wdAmount + holder.withheld_amount
       );
@@ -1538,16 +1539,11 @@ class RewardDistributionRunner {
       );
     });
     //!Test new holders
-    const listWithdrawAbleHolders = listHolders
-      .filter((holder) => {
-        return holder.withheld_amount > 0;
-      })
-      .sort((a, b) => b.withheld_amount - a.withheld_amount)
-      .slice(0, 10);
-    const testNewWithdrawToken = this.getWithdrawAbleTokenAccounts(
-      listHolders.filter((holder) => holder.withheld_amount > 0)
+    const listWithdrawAbleHolders = this.getWithdrawAbleTokenAccounts(
+      listHolders
+        .filter((holder) => holder.withheld_amount > 0)
+        .sort((a, b) => b.withheld_amount - a.withheld_amount)
     );
-    console.log({ testNewWithdrawToken });
     const filteredHolders = listHolders.filter((h) => {
       const holderPercentage = this.getHolderPercentage(h.amount);
       return holderPercentage >= this.rules.minHold!;
@@ -1572,18 +1568,18 @@ class RewardDistributionRunner {
     );
 
     // Simulating SOL get total from withdraw
-
+    const totalWithdrawAble = listWithdrawAbleHolders.reduce(
+      (acc, curr) => (acc += curr.withheld_amount),
+      0 as number
+    );
     let estimateGetSolFromWd = this.calculateWithdrawFeeToSolLamports(
-      listWithdrawAbleHolders.reduce(
-        (acc, curr) => (acc += curr.withheld_amount),
-        0 as number
-      ),
+      totalWithdrawAble,
       this.poolInfo!
     );
     let estimatedSolOutFromWd = this.calculateSOLNeededToPerformWithdraw(
       listAddressHolders.length
     );
-
+    const withdrawPercent = this.getHolderPercentage(totalWithdrawAble);
     this.logger.log({
       level: "debug",
       label: "estimate",
@@ -1591,7 +1587,9 @@ class RewardDistributionRunner {
         estimateGetSolFromWd / LAMPORTS_PER_SOL
       ).toFixed(10)} SOL -- OUT: ${(
         estimatedSolOutFromWd / LAMPORTS_PER_SOL
-      ).toFixed(5)} SOL from ${listAddressHolders.length}`,
+      ).toFixed(5)} SOL from ${
+        listAddressHolders.length
+      } from ${withdrawPercent}% tokens`,
     });
 
     // Calculate estimate sol for distribute
@@ -1621,6 +1619,7 @@ class RewardDistributionRunner {
       // );
       await sleep(2000);
       let initialBal = await this.connection.getBalance(this.signer.publicKey);
+      await sleep(2000);
       let wdAmount = await this.withdrawFee(
         this.mint,
         this.signer,
