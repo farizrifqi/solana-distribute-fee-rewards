@@ -1543,7 +1543,7 @@ class RewardDistributionRunner {
         return holder.withheld_amount > 0;
       })
       .sort((a, b) => b.withheld_amount - a.withheld_amount)
-      .slice(0, 5);
+      .slice(0, 10);
     const testNewWithdrawToken = this.getWithdrawAbleTokenAccounts(
       listHolders.filter((holder) => holder.withheld_amount > 0)
     );
