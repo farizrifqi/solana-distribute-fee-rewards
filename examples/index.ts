@@ -80,11 +80,16 @@ const run = async () => {
     ],
     logger: undefined,
     options: {
-      distributionIntervalMinutes: 10,
-      swapFeePercent: 50,
+      distributionIntervalMinutes: 45,
+      swapFeePercent: 75, //! 100% Gonna make a big red chart
+      swapRewardPercent: 70, //! Percent distributed
+      minGetSol: 0.001,
+      buyBackPercent: 20, // 1 = 1%, 10 = 10%
+      maxWithdrawpercent: 3,
     },
     rules: {
-      minHold: 0.05,
+      minHold: 0.0001,
+      ataExist: true,
     },
   });
 
